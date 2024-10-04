@@ -23,7 +23,9 @@ defmodule Bumblebee.Audio.SpeechToTextWhisper do
         defn_options: [],
         preallocate_params: false,
         task: :transcribe,
-        stream: false
+        stream: false,
+        logprob_threshold: 0.6,
+        no_speech_threshold: -1.0
       ])
 
     %{model: model, params: params, spec: spec} = model_info
@@ -59,7 +61,7 @@ defmodule Bumblebee.Audio.SpeechToTextWhisper do
       context_num_seconds: context_num_seconds
     }
 
-    {generate_opts, generation_config} = generate_opts(generation_config, opts)
+    {generate_opts, generation_config} = generate_opts(model_info, generation_config, opts)
     generate_fun = Text.Generation.build_generate(model, spec, generation_config, generate_opts)
 
     generate_fun = fn params, {inputs, seed} ->
@@ -210,27 +212,65 @@ defmodule Bumblebee.Audio.SpeechToTextWhisper do
     end
   end
 
-  defp generate_opts(generation_config, opts) do
+  defp generate_opts(model_info, generation_config, opts) do
     forced_token_ids = forced_token_ids(opts, generation_config.extra_config)
     generation_config = %{generation_config | forced_token_ids: forced_token_ids}
 
     logits_processors =
-      if opts[:timestamps] do
-        [
-          &Bumblebee.Text.Generation.LogitsProcessing.whisper_timestamp_processor(&1, &2,
-            eos_token_id: generation_config.eos_token_id,
-            forced_token_ids: generation_config.forced_token_ids,
-            no_timestamps_token_id: generation_config.extra_config.no_timestamps_token_id,
-            timestamp_begin_id: generation_config.extra_config.no_timestamps_token_id + 1
-          )
-        ]
-      else
-        []
-      end
+      []
+      |> add_no_speech_detection_processor(opts, model_info, generation_config)
+      |> add_timestamp_processor(opts, generation_config)
+      |> add_suppress_tokens_at_begin_processor(opts, model_info)
 
-    opts = [logits_processors: logits_processors]
+    {[logits_processors: logits_processors], generation_config}
+  end
 
-    {opts, generation_config}
+  defp add_timestamp_processor(processors, opts, generation_config) do
+    timestamp_processor =
+      &Bumblebee.Text.Generation.LogitsProcessing.whisper_timestamp_processor(&1, &2,
+        eos_token_id: generation_config.eos_token_id,
+        forced_token_ids: generation_config.forced_token_ids,
+        no_timestamps_token_id: generation_config.extra_config.no_timestamps_token_id,
+        timestamp_begin_id: generation_config.extra_config.no_timestamps_token_id + 1
+      )
+
+    if opts[:timestamps] do
+      [timestamp_processor | processors]
+    else
+      processors
+    end
+  end
+
+  defp add_suppress_tokens_at_begin_processor(processors, opts, model_info) do
+    suppress_tokens_at_begin_processor =
+      &Bumblebee.Text.Generation.LogitsProcessing.suppress_tokens_at_begin_processor(
+        &1,
+        &2,
+        begin_suppress_tokens:
+          Nx.tensor(model_info.spec.begin_suppress_tokens) |> Nx.new_axis(-1),
+        begin_index: opts[:begin_index] || 1
+      )
+
+    [suppress_tokens_at_begin_processor | processors]
+  end
+
+  defp add_no_speech_detection_processor(processors, opts, model_info, generation_config) do
+    no_speech_detection_processor = fn logits, context ->
+      Bumblebee.Text.Generation.LogitsProcessing.whisper_no_speech_detection(
+        logits,
+        context,
+        no_speech_token: List.first(model_info.spec.begin_suppress_tokens),
+        forced_token_ids: generation_config.forced_token_ids,
+        no_speech_threshold: opts[:no_speech_threshold],
+        logprob_threshold: opts[:logprob_threshold]
+      )
+    end
+
+    if opts[:no_speech_threshold] && opts[:logprob_threshold] do
+      [no_speech_detection_processor | processors]
+    else
+      processors
+    end
   end
 
   defp forced_token_ids(opts, extra_config) do

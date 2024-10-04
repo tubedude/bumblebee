@@ -201,6 +201,46 @@ defmodule Bumblebee.Text.Generation.LogitsProcessing do
     end
   end
 
+  defn whisper_no_speech_detection(logits, context, opts \\ []) do
+    opts =
+      keyword!(opts, [
+        :no_speech_token,
+        :forced_token_ids,
+        :no_speech_threshold,
+        :logprob_threshold
+      ])
+
+    no_speech_token = opts[:no_speech_token]
+    begin_idx = begin_idx(opts[:forced_token_ids])
+    no_speech_threshold = opts[:no_speech_threshold]
+    logprob_threshold = opts[:logprob_threshold]
+
+    if context.length == begin_idx do
+      scores = Axon.Activations.log_softmax(logits)
+      no_speech_logprob = scores[no_speech_token]
+      avg_logprob = compute_avg_logprob(scores, context.sequence)
+
+      should_skip =
+        Nx.logical_and(
+          Nx.greater(no_speech_logprob, Nx.log(no_speech_threshold)),
+          Nx.less(avg_logprob, Nx.log(logprob_threshold))
+        )
+
+      # Set the logits to -inf where should_skip is true
+      # Broadcasting should_skip to match logits shape
+      should_skip = Nx.broadcast(should_skip, Nx.shape(logits))
+      Nx.select(should_skip, Nx.Constants.neg_infinity(Nx.type(logits)), logits)
+    else
+      logits
+    end
+  end
+
+  defnp compute_avg_logprob(scores, sequence) do
+    sequence_length = Nx.size(sequence)
+    total_logprob = Nx.sum(Nx.take(scores, sequence))
+    Nx.divide(total_logprob, sequence_length)
+  end
+
   defnp force_timestamp_pair(logits, context, begin_idx, eos_token_id, timestamp_begin_id) do
     # Force timestamp tokens to appear in pairs, end followed by
     # start, except directly before the EOS token
@@ -235,6 +275,17 @@ defmodule Bumblebee.Text.Generation.LogitsProcessing do
     Nx.select(ignore_mask, Nx.Constants.neg_infinity(Nx.type(logits)), logits)
   end
 
+  defn add_logprob_processor(logits, _context, _opts \\ []) do
+    # Calculate log probabilities
+    log_probabilities = Axon.Activations.log_softmax(logits)
+
+    # Combine logits with log probabilities by adding the log probabilities as a new dimension
+    updated_logits = Nx.concatenate([logits, log_probabilities], axis: -1)
+
+    # Return updated logits for further processing
+    updated_logits
+  end
+
   defnp maybe_force_timestamp(logits, timestamp_begin_id) do
     # If the total probability of all timestamps exceeds any regular
     # token, we force a timestamp
@@ -251,6 +302,22 @@ defmodule Bumblebee.Text.Generation.LogitsProcessing do
     tokens_mask = Nx.iota(Nx.shape(logits)) < timestamp_begin_id
     ignore_mask = force_timestamp_mask and tokens_mask
     Nx.select(ignore_mask, Nx.Constants.neg_infinity(Nx.type(logits)), logits)
+  end
+
+  defn suppress_tokens_at_begin_processor(logits, context, opts \\ []) do
+    opts = keyword!(opts, [:begin_suppress_tokens, :begin_index])
+    begin_suppress_tokens = opts[:begin_suppress_tokens]
+    begin_index = opts[:begin_index]
+
+    if context.length == begin_index do
+      # Set the logits for the suppressed tokens to negative infinity
+      values =
+        Nx.broadcast(Nx.Constants.neg_infinity(Nx.type(logits)), {Nx.size(begin_suppress_tokens)})
+
+      Nx.indexed_put(logits, begin_suppress_tokens, values)
+    else
+      logits
+    end
   end
 
   deftransformp begin_idx(forced_token_ids) do
