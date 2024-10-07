@@ -242,12 +242,13 @@ defmodule Bumblebee.Audio.SpeechToTextWhisper do
   end
 
   defp add_suppress_tokens_at_begin_processor(processors, opts, model_info) do
+    begin_suppress_tokens = model_info.spec.begin_suppress_tokens || []
+
     suppress_tokens_at_begin_processor =
       &Bumblebee.Text.Generation.LogitsProcessing.suppress_tokens_at_begin_processor(
         &1,
         &2,
-        begin_suppress_tokens:
-          Nx.tensor(model_info.spec.begin_suppress_tokens) |> Nx.new_axis(-1),
+        begin_suppress_tokens: Nx.tensor(begin_suppress_tokens) |> Nx.new_axis(-1),
         begin_index: opts[:begin_index] || 1
       )
 

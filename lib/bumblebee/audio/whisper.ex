@@ -528,7 +528,7 @@ defmodule Bumblebee.Audio.Whisper do
           activation_dropout_rate: {"activation_dropout", number()},
           initializer_scale: {"init_std", number()},
           suppress_tokens: {"suppress_tokens", list(number())},
-          begin_suppress_tokens: {"begin_suppress_tokens", list(number())},
+          begin_suppress_tokens: {"begin_suppress_tokens", optional(list(number()))},
           forced_decoder_ids: {"forced_decoder_ids", list(list(number()))},
           no_timestamps_token_id: {"no_timestamps_token", number()}
         ) ++ Shared.common_options_from_transformers(data, spec)
